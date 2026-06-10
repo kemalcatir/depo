@@ -1,6 +1,7 @@
 """
 Nöbet Planlama Algoritması
 Tüm 9 kurala uygun heuristic greedy search algoritması
+Ay geçişlerinde istirahat kuralı uygulanır
 """
 
 import sqlite3
@@ -99,9 +100,11 @@ def generate_plan(year, month):
         logger.info(f"🚫 Kısıtlamalar: {len(restrictions)} personel")
         
         # 5. ÖNCEKİ AY VERİLERİNİ YÜKLESİ (Kural 3 & 4)
+        # GÜNCELLENMIŞ: Ay geçişlerinde de istirahat kuralı uygulanır
         target = datetime(year, month, 1) - timedelta(days=1)
         prev_y, prev_m = target.year, target.month
         
+        # Önceki ayın verilerini yükle
         cursor.execute("""
             SELECT personel_id, tarih 
             FROM aylik_nobetler 
@@ -130,6 +133,25 @@ def generate_plan(year, month):
                 continue
         
         logger.info(f"📊 Önceki ay: {len(prev_month_data)} personel")
+        
+        # YENI: Önceki ayın son nöbetçilerinin en son nöbet tarihini al
+        # (Ay geçişinde istirahat kuralını uygulamak için)
+        cursor.execute("""
+            SELECT personel_id, MAX(tarih) as last_tarih
+            FROM aylik_nobetler 
+            WHERE personel_id IN ({})
+            GROUP BY personel_id
+        """.format(','.join('?' * len(personnel_ids))), personnel_ids)
+        
+        for p_id, last_tarih in cursor.fetchall():
+            try:
+                tarih_dt = datetime.strptime(last_tarih, "%Y-%m-%d")
+                if p_id not in last_duty_dates or tarih_dt > last_duty_dates[p_id]:
+                    last_duty_dates[p_id] = tarih_dt
+            except ValueError:
+                continue
+        
+        logger.info(f"📋 Tüm kişilerin son nöbeti yüklendi: {len(last_duty_dates)} personel")
         conn.close()
         
         # 6. İSTATİSTİKLERİ BAŞLAT
@@ -154,6 +176,8 @@ def generate_plan(year, month):
         empty_days = 0
         partial_days = 0
         
+        logger.info(f"🔄 {num_days} gün için plan hazırlanıyor...\n")
+        
         for day in range(1, num_days + 1):
             current_date = datetime(year, month, day)
             date_str = current_date.strftime("%Y-%m-%d")
@@ -170,10 +194,11 @@ def generate_plan(year, month):
                 if p_id in restrictions and date_str in restrictions[p_id]:
                     continue
                 
-                # Kural 5: İstirahat kuralı
+                # Kural 5: İstirahat kuralı (Ay geçişlerinde de uygulanır)
                 last_duty = stats[p_id]['last_duty']
                 if last_duty and isinstance(last_duty, datetime):
-                    if (current_date - last_duty).days < settings['min_rest_days']:
+                    days_rest = (current_date - last_duty).days
+                    if days_rest < settings['min_rest_days']:
                         continue
                 
                 # Kural 9: Cumartesi üst üste engel
