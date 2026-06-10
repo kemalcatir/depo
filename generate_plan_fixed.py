@@ -16,12 +16,12 @@ class DutyScheduler:
         self.personnel_dict = {}
         self.personnel_ids = []
         self.settings = {}
-        self.scoring_system = {}
         self.restrictions = {}
         self.prev_month_data = {}
         self.last_duty_dates = {}
         self.stats = {}
-        self.saturday_consecutive = {}  # Cumartesi üst üste kontrolü
+        self.saturday_consecutive = {}
+        self.special_days = {}  # Özel gün puanlamaları
         
     def load_settings(self):
         """Sistem ayarlarını yükle"""
@@ -29,28 +29,67 @@ class DutyScheduler:
         cursor = conn.cursor()
         try:
             # Ana ayarlar
-            cursor.execute("SELECT nobetci_sayisi, min_rest_days FROM ayarlar WHERE id=1")
+            cursor.execute("""
+                SELECT nobetci_sayisi, puan_total, puan_ayni_gun, puan_dinlenme,
+                       puan_pazartesi, puan_sali, puan_carsamba, puan_persembe, 
+                       puan_cuma, puan_cumartesi, puan_pazar
+                FROM ayarlar WHERE id=1
+            """)
             row = cursor.fetchone()
             if row:
                 self.settings = {
                     'nobetci_sayisi': row[0] if row[0] else 6,
-                    'min_rest_days': row[1] if row[1] else 2
+                    'puan_total': row[1] if row[1] else 50,
+                    'puan_ayni_gun': row[2] if row[2] else 300,
+                    'puan_dinlenme': row[3] if row[3] else 15,
+                    'puan_pazartesi': row[4] if row[4] else 0,
+                    'puan_sali': row[5] if row[5] else 0,
+                    'puan_carsamba': row[6] if row[6] else 0,
+                    'puan_persembe': row[7] if row[7] else 0,
+                    'puan_cuma': row[8] if row[8] else 0,
+                    'puan_cumartesi': row[9] if row[9] else 80,
+                    'puan_pazar': row[10] if row[10] else 80,
+                    'min_rest_days': 2  # Varsayılan
                 }
             else:
-                self.settings = {'nobetci_sayisi': 6, 'min_rest_days': 2}
+                self.settings = {
+                    'nobetci_sayisi': 6,
+                    'puan_total': 50,
+                    'puan_ayni_gun': 300,
+                    'puan_dinlenme': 15,
+                    'puan_pazartesi': 0,
+                    'puan_sali': 0,
+                    'puan_carsamba': 0,
+                    'puan_persembe': 0,
+                    'puan_cuma': 0,
+                    'puan_cumartesi': 80,
+                    'puan_pazar': 80,
+                    'min_rest_days': 2
+                }
             
-            # Gün gün puanlama sistemi (Kural 6)
-            cursor.execute("SELECT gun, puan FROM puanlama_sistemi ORDER BY gun")
-            rows = cursor.fetchall()
-            for gun, puan in rows:
-                self.scoring_system[gun] = puan  # 0=Pazartesi, 1=Salı, ..., 6=Pazar
+            # Özel günleri yükle
+            cursor.execute("SELECT tarih, puan FROM ozel_gun_puanlari ORDER BY tarih")
+            special_rows = cursor.fetchall()
+            self.special_days = {row[0]: row[1] for row in special_rows}
             
-            logger.info(f"Sistem ayarları yüklendi: {self.settings}")
-            logger.info(f"Puanlama sistemi: {self.scoring_system}")
+            logger.info(f"✅ Sistem ayarları yüklendi: {self.settings['nobetci_sayisi']} kişi/gün")
+            logger.info(f"✅ Özel gün puanlamaları: {len(self.special_days)} gün")
         except sqlite3.OperationalError as e:
-            logger.warning(f"Sistem ayarları okunamadı: {e}. Default değerler kullanılıyor.")
-            self.settings = {'nobetci_sayisi': 6, 'min_rest_days': 2}
-            self.scoring_system = {i: 10 for i in range(7)}
+            logger.warning(f"⚠️ Sistem ayarları okunamadı: {e}. Default değerler kullanılıyor.")
+            self.settings = {
+                'nobetci_sayisi': 6,
+                'puan_total': 50,
+                'puan_ayni_gun': 300,
+                'puan_dinlenme': 15,
+                'puan_pazartesi': 0,
+                'puan_sali': 0,
+                'puan_carsamba': 0,
+                'puan_persembe': 0,
+                'puan_cuma': 0,
+                'puan_cumartesi': 80,
+                'puan_pazar': 80,
+                'min_rest_days': 2
+            }
         finally:
             conn.close()
 
@@ -58,13 +97,13 @@ class DutyScheduler:
         """Aktif personeli yükle"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, ad_soyad FROM personel WHERE aktif_mi=1 ORDER BY ad_soyad")
+        cursor.execute("SELECT id, unvan, ad_soyad FROM personel WHERE aktif_mi=1 ORDER BY ad_soyad")
         personnel = cursor.fetchall()
         conn.close()
         
         self.personnel_ids = [p[0] for p in personnel]
-        self.personnel_dict = {p[0]: p[1] for p in personnel}
-        logger.info(f"Toplam aktif personel: {len(self.personnel_ids)}")
+        self.personnel_dict = {p[0]: f"{p[1]} {p[2]}" if p[1] else p[2] for p in personnel}
+        logger.info(f"👥 Toplam aktif personel: {len(self.personnel_ids)}")
         
         return len(self.personnel_ids) > 0
 
@@ -80,7 +119,7 @@ class DutyScheduler:
             """, (str(year), f"{month:02d}"))
             rows = cursor.fetchall()
         except sqlite3.OperationalError as e:
-            logger.warning(f"Kısıtlamalar okunamadı: {e}")
+            logger.warning(f"⚠️ Kısıtlamalar okunamadı: {e}")
             rows = []
         finally:
             conn.close()
@@ -91,7 +130,7 @@ class DutyScheduler:
                 self.restrictions[p_id] = set()
             self.restrictions[p_id].add(tarih)
         
-        logger.info(f"{len(self.restrictions)} personelin kısıtlaması bulundu")
+        logger.info(f"🚫 {len(self.restrictions)} personelin kısıtlaması bulundu")
 
     def load_prev_month_data(self, year, month):
         """
@@ -112,14 +151,13 @@ class DutyScheduler:
             """, (str(prev_y), f"{prev_m:02d}"))
             rows = cursor.fetchall()
         except sqlite3.OperationalError as e:
-            logger.warning(f"Önceki ay verileri okunamadı: {e}")
+            logger.warning(f"⚠️ Önceki ay verileri okunamadı: {e}")
             rows = []
         finally:
             conn.close()
 
         self.prev_month_data = {}
         self.last_duty_dates = {}
-        weekend_scores = {}  # Kural 3: Haftasonu puanı
         
         for p_id, tarih in rows:
             if p_id not in self.prev_month_data:
@@ -132,7 +170,7 @@ class DutyScheduler:
             try:
                 tarih_dt = datetime.strptime(tarih, "%Y-%m-%d")
             except ValueError:
-                logger.warning(f"Tarih parse hatası: {tarih}")
+                logger.warning(f"⚠️ Tarih parse hatası: {tarih}")
                 continue
             
             self.prev_month_data[p_id]['days'].add(tarih_dt.day)
@@ -146,7 +184,7 @@ class DutyScheduler:
             if p_id not in self.last_duty_dates or tarih_dt > self.last_duty_dates[p_id]:
                 self.last_duty_dates[p_id] = tarih_dt
         
-        logger.info(f"Önceki ay: {len(self.prev_month_data)} personel verisi yüklendi")
+        logger.info(f"📊 Önceki ay: {len(self.prev_month_data)} personel verisi yüklendi")
 
     def initialize_stats(self):
         """Personel istatistiklerini başlat"""
@@ -162,16 +200,34 @@ class DutyScheduler:
                 'sunday': 0,
                 'days': [],
                 'last_duty': self.last_duty_dates.get(p_id),
-                'last_saturday': None  # Kural 9 için son cumartesi
+                'last_saturday': None
             }
             self.saturday_consecutive[p_id] = False
 
-    def get_special_day_score(self, date):
+    def get_day_score(self, date):
         """
-        Kural 8: Sistem Ayarlarındaki Özel Gün puanlamasını al
+        Kural 6 & 8: Gün puanlamasını al (Sistem Ayarlarından)
+        Özel günler varsa onları kullan, yoksa haftalık puanları
         """
-        weekday = date.weekday()
-        return self.scoring_system.get(weekday, 10)
+        date_str = date.strftime("%Y-%m-%d")
+        
+        # Çoklu özel gün puanlaması (Kural 8)
+        if date_str in self.special_days:
+            return self.special_days[date_str]
+        
+        # Haftalık puanlama (Kural 6)
+        weekday = date.weekday()  # 0=Monday, 6=Sunday
+        day_scores = {
+            0: self.settings.get('puan_pazartesi', 0),
+            1: self.settings.get('puan_sali', 0),
+            2: self.settings.get('puan_carsamba', 0),
+            3: self.settings.get('puan_persembe', 0),
+            4: self.settings.get('puan_cuma', 0),
+            5: self.settings.get('puan_cumartesi', 80),
+            6: self.settings.get('puan_pazar', 80)
+        }
+        
+        return day_scores.get(weekday, 0)
 
     def is_eligible_for_duty(self, p_id, current_date, date_str, weekday):
         """
@@ -183,10 +239,11 @@ class DutyScheduler:
             return False, "Kısıtlama"
         
         # Kural 5: Maximum istirahat kuralı
+        min_rest = self.settings.get('min_rest_days', 2)
         last_duty = self.stats[p_id]['last_duty']
         if last_duty and isinstance(last_duty, datetime):
             days_since_duty = (current_date - last_duty).days
-            if days_since_duty < self.settings['min_rest_days']:
+            if days_since_duty < min_rest:
                 return False, f"İstirahat: {days_since_duty} gün"
         
         # Kural 9: Cumartesi üst üste kontrol
@@ -196,20 +253,20 @@ class DutyScheduler:
         
         return True, "Uygun"
 
-    def calculate_priority(self, p_id, current_date, weekday, date_str):
+    def calculate_priority(self, p_id, current_date, weekday, date_str, current_day):
         """
         Soft Constraints: Puanlama sistemi
         Kural 1: Eşit nöbet dağılımı
         Kural 2: Perşembe-Cuma eşit
         Kural 3: Haftasonu eşit (önceki ay puanına göre)
-        Kural 6: Gün gün puanlama
-        Kural 8: Özel gün puanlama
+        Kural 6 & 8: Gün gün puanlama sistemi
         """
         priority = 1000000000  # Başlangıç puanı
         
         # Kural 1: Adil dağılım - az nöbet tutanı tercih et
         total_assigned = self.stats[p_id]['total']
-        priority -= (total_assigned * 10000)
+        puan_total = self.settings.get('puan_total', 50)
+        priority -= (total_assigned * puan_total)
         
         # Kural 2: Perşembe ve Cuma eşit dağılımı
         if weekday == 3:  # Perşembe
@@ -220,32 +277,27 @@ class DutyScheduler:
         # Kural 3: Haftasonu eşit dağılımı (önceki ay puanına göre)
         if weekday >= 5:  # Cumartesi veya Pazar
             prev_weekend_score = self.prev_month_data.get(p_id, {}).get('weekend_score', 0)
-            
-            # Önceki ayda az haftasonu nöbeti tutanı tercih et
             priority -= (prev_weekend_score * 50000)
             
-            # O ayki haftasonu sayısı da dikkate al
             if weekday == 5:  # Cumartesi
                 priority -= (self.stats[p_id]['saturday'] * 12000)
             else:  # Pazar
                 priority -= (self.stats[p_id]['sunday'] * 12000)
         
-        # Kural 6 & 8: Gün gün puanlama sistemi
-        day_score = self.get_special_day_score(current_date)
-        priority -= (total_assigned * day_score * 500)
+        # Kural 6 & 8: Gün puanlaması
+        day_score = self.get_day_score(current_date)
+        priority -= (total_assigned * day_score * 100)
         
-        # Negatif puanları önle
+        # Kural 8: Önceki ay aynı güne çakışmasını engelle (hafif ceza)
         if current_day in self.prev_month_data.get(p_id, {}).get('days', set()):
-            priority -= 50000  # Önceki ay aynı güne çakışmasını az cezalandır
+            priority -= 50000
         
         return priority
 
     def select_personnel_for_day(self, current_date, date_str, candidates_list, num_per_day):
-        """
-        Günlük seçim
-        """
+        """Günlük seçim"""
         if not candidates_list:
-            logger.warning(f"{date_str}: Hiçbir uygun personel bulunamadı")
+            logger.warning(f"🚫 {date_str}: Hiçbir uygun personel bulunamadı")
             return []
         
         # En yüksek puanlıları sırala
@@ -255,7 +307,7 @@ class DutyScheduler:
         selected_ids = [c[1] for c in selected]
         
         if len(selected_ids) < num_per_day:
-            logger.warning(f"{date_str}: Sadece {len(selected_ids)}/{num_per_day} personel seçildi")
+            logger.warning(f"⚠️ {date_str}: Sadece {len(selected_ids)}/{num_per_day} personel seçildi")
         
         return selected_ids
 
@@ -277,25 +329,25 @@ class DutyScheduler:
             elif weekday == 6:
                 self.stats[p_id]['sunday'] += 1
         
-        # Cumartesi konsekütifliğini sıfırla (diğer günler için)
+        # Cumartesi flag'i sıfırla (sadece cumartesi değilse ve seçilmediyse)
         if weekday != 5:
             for p_id in self.personnel_ids:
                 if p_id not in selected_ids:
-                    # Bu kişi bu gün seçilmediyse ve bu cumartesi değilse, 
-                    # cumartesi flag'i sıfırlanmaz
-                    pass
+                    self.saturday_consecutive[p_id] = False
 
     def generate_plan(self, year, month):
         """
         Ana plan oluşturma fonksiyonu
-        Tüm kuralları uygula
+        Tüm 9 kuralı uygula
         """
-        logger.info(f"Plan oluşturuluyor: {year}-{month:02d}")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"📅 Plan oluşturuluyor: {year}-{month:02d}")
+        logger.info(f"{'='*60}\n")
         
         # Adım 1: Verileri yükle
         self.load_settings()
         if not self.load_personnel():
-            return {"status": "error", "message": "Aktif personel bulunamadı!"}
+            return {"status": "error", "message": "❌ Aktif personel bulunamadı!"}
         
         self.load_restrictions(year, month)
         self.load_prev_month_data(year, month)
@@ -308,6 +360,8 @@ class DutyScheduler:
         # İstatistik
         empty_days = 0
         partial_days = 0
+        
+        logger.info(f"🔄 {num_days} gün için plan hazırlanıyor...\n")
         
         # Adım 2: Her gün için personel seç
         for day in range(1, num_days + 1):
@@ -326,7 +380,7 @@ class DutyScheduler:
                     continue
                 
                 # Uygunsa puanlama yap
-                priority = self.calculate_priority(p_id, current_date, weekday, date_str)
+                priority = self.calculate_priority(p_id, current_date, weekday, date_str, current_day)
                 candidates.append((priority, p_id))
             
             # Adım 4: Günlük personeli seç
@@ -356,7 +410,11 @@ class DutyScheduler:
                 'last_duty': self.stats[p_id]['last_duty'].strftime("%Y-%m-%d") if self.stats[p_id]['last_duty'] else None
             }
         
-        logger.info(f"Plan tamamlandı: {empty_days} boş gün, {partial_days} kısmi atama")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"✅ Plan tamamlandı!")
+        logger.info(f"   📊 Boş gün: {empty_days}")
+        logger.info(f"   ⚠️  Kısmi atama: {partial_days}")
+        logger.info(f"{'='*60}\n")
         
         return {
             "status": "success",
