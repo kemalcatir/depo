@@ -1,7 +1,7 @@
 """
 Nöbet Planlama Algoritması
 Tüm 9 kurala uygun heuristic greedy search algoritması
-Ay geçişlerinde istirahat kuralı uygulanır
+Ay geçişlerinde istirahat kuralı uygulanır - MİNİMUM 2 GÜN KATIDIR
 """
 
 import sqlite3
@@ -64,9 +64,10 @@ def generate_plan(year, month):
             'puan_cuma': settings_row[8] or 0,
             'puan_cumartesi': settings_row[9] or 80,
             'puan_pazar': settings_row[10] or 80,
-            'min_rest_days': 2
+            'min_rest_days': 2  # KATI KURAL: Minimum 2 gün
         }
         logger.info(f"✅ Sistem ayarları: {settings['nobetci_sayisi']} kişi/gün")
+        logger.info(f"⚠️ İSTİRAHAT KURALI: Minimum {settings['min_rest_days']} gün (KATIDIR)")
         
         # 2. ÖZEL GÜNLERİ YÜKLESİ
         cursor.execute("SELECT tarih, puan FROM ozel_gun_puanlari ORDER BY tarih")
@@ -194,11 +195,13 @@ def generate_plan(year, month):
                 if p_id in restrictions and date_str in restrictions[p_id]:
                     continue
                 
-                # Kural 5: İstirahat kuralı (Ay geçişlerinde de uygulanır)
+                # Kural 5: İstirahat kuralı (KATI - Minimum 2 gün)
+                # Ay geçişlerinde de uygulanır
                 last_duty = stats[p_id]['last_duty']
                 if last_duty and isinstance(last_duty, datetime):
                     days_rest = (current_date - last_duty).days
-                    if days_rest < settings['min_rest_days']:
+                    # KATI KURAL: 2 günden az olamaz
+                    if days_rest < 2:
                         continue
                 
                 # Kural 9: Cumartesi üst üste engel
